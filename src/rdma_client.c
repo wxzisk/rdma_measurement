@@ -5,7 +5,9 @@
  */
 
 #include "rdma_common.h"
-
+#include <pthread.h>
+#include <time.h>
+#include <sys/time.h>
 /* These are basic RDMA resources */
 /* These are RDMA connection related resources */
 static struct rdma_event_channel *cm_event_channel = NULL;
@@ -26,13 +28,27 @@ static struct ibv_recv_wr server_recv_wr, *bad_server_recv_wr = NULL;
 static struct ibv_sge client_send_sge, server_recv_sge;
 /* Source and Destination buffers, where RDMA operations source and sink */
 static char *src = NULL, *dst = NULL; 
-
+static int message_len = 5000;
+static int max_generation = 10000;
 /* This is our testing function */
 static int check_src_dst() 
 {
 	return memcmp((void*) src, (void*) dst, strlen(src));
 }
 
+static void loop_in_poll_cq(void *arg)
+{
+  struct ibv_cq* cq = arg;
+  struct ibv_wc wc;
+  	while(1)
+  	{
+    	int ret = ibv_poll_cq(client_cq,1,&wc);
+    	if(ret > 0)
+    	{
+    		printf("get a cqe \n");
+    	}
+  }
+}
 /* This function prepares client side connection resources for an RDMA connection */
 static int client_prepare_connection(struct sockaddr_in *s_addr)
 {
@@ -344,14 +360,61 @@ static int client_remote_memory_ops()
 				-errno);
 		return -errno;
 	}
-	/* at this point we are expecting 1 work completion for the write */
-	ret = process_work_completion_events(io_completion_channel, 
-			&wc, 1);
-	if(ret != 1) {
-		rdma_error("We failed to get 1 work completions , ret = %d \n",
-				ret);
-		return ret;
+
+
+	// pthread_t  thid;
+	// if(pthread_create(&thid, NULL, loop_in_poll_cq, client_qp) != 0)
+	// {
+	// 	printf("thread create failed! \n");
+	// 	exit(1);
+	// }
+	int generation = max_generation;
+	struct timeval start_time,end_time;
+	int post_success_num = 0, poll_success_num = 0;
+	ret = 0;
+	gettimeofday(&start_time, NULL);
+	while(generation)
+	{
+			ret = ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
+			post_success_num += (ret == 0)? 1:0;
+			if(generation % 10 ==)
+			poll_success_num += ibv_poll_cq(client_cq, 10, &wc);
+			generation--;
 	}
+	printf("post_success_num: %d \n -------------------- \n",post_success_num);
+	printf("poll_success_num: %d \n",poll_success_num);
+	int poll_num_left = post_success_num - poll_success_num;
+	while(poll_num_left > 0)
+	{
+			poll_num_left -= ibv_poll_cq(client_cq, 10, &wc);
+	}
+	printf("poll_num_left: %d \n",poll_num_left);
+	gettimeofday(&end_time, NULL);
+	
+	int run_time = (end_time.tv_sec - start_time.tv_sec)*1000000 + (end_time.tv_usec - start_time.tv_usec);
+	long double byte_count = (long double)max_generation * message_len  ; 
+	// byte -> Gb(*8/1e9),  us -> s(/1e6)
+	long double throughput_rate = byte_count / (long double)run_time / 125; //(max_generation * message_len ) *8 / 1e9 / run_time * 1e6;
+	// printf("start_time: %ds and %ld us \n", start_time.tv_sec, start_time.tv_usec);
+	// printf("end_time: %ds and %ld us \n", end_time.tv_sec, end_time.tv_usec);
+	printf("end_time.tv_sec - start_time.tv_sec: %ld , end_time.tv_usec - start_time.tv_usec: %ld , run_time: %d us \n",
+				 end_time.tv_sec - start_time.tv_sec, end_time.tv_usec - start_time.tv_usec,run_time);
+	printf("byte count: %Lf \n", byte_count);
+	printf("throughput rate: %Lf \n", throughput_rate);
+
+	// for(int i = 0; i<10; i++)
+	// {
+	// 	ibv_post_send(client_qp, &client_send_wr, &bad_client_send_wr);
+	// }
+
+		/* at this point we are expecting 1 work completion for the write */
+	// ret = process_work_completion_events(io_completion_channel, 
+	// 		&wc, 1);
+	// if(ret != 1) {
+	// 	rdma_error("We failed to get 1 work completions , ret = %d \n",
+	// 			ret);
+	// 	return ret;
+	// }
 	debug("Client side WRITE is complete \n");
 	/* Now we prepare a READ using same variables but for destination */
 	client_send_sge.addr = (uint64_t) client_dst_mr->addr;
@@ -468,6 +531,8 @@ int main(int argc, char **argv) {
 	server_sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	/* buffers are NULL */
 	src = dst = NULL; 
+	src = calloc(message_len,1); memset(src, '-', 4999);
+	dst = calloc(message_len,1); memset(dst, '-', 4999);
 	/* Parse Command Line Arguments */
 	while ((option = getopt(argc, argv, "s:a:p:")) != -1) {
 		switch (option) {
